@@ -20,6 +20,7 @@ from matplotlib import pyplot as plt
 from scipy.spatial import distance
 import uuid
 import ml_helper as mlh
+import threading
 
 
 filename = '._in_progress.avi'
@@ -31,7 +32,27 @@ stream_source = 'none'
 #begin counter / end counter
 doorevent = False
 event_begin = 0
+event_in_prog = False
+current_event_name = ""
 
+#My recording parameters
+RECORDING = False
+TIME_TO_BUFFER = 10 #seconds to record before event
+lastDoorEvent = 0
+VIDEO_AFTER_EVENT = 10 #seconds to record after event
+
+
+
+#audio params
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+WIDTH = 2
+CHANNELS = 2
+RATE = 44100
+RECORD_SECONDS = 5
+WAVE_OUTPUT_FILENAME = "audio.wav"
+INPUT_IND = 6
+RECORD = True
 
 # Set resolution for the video capture
 # Function adapted from https://kirr.co/0l6qmh
@@ -60,9 +81,10 @@ def get_dims(cap, res='1080p'):
 # Video Encoding, might require additional installs
 # Types of Codes: http://www.fourcc.org/codecs.php
 VIDEO_TYPE = {
-    'avi': cv2.VideoWriter_fourcc(*'XVID'),
+    'avi': cv2.VideoWriter_fourcc(*'MJPG'),
     #'mp4': cv2.VideoWriter_fourcc(*'H264'),
-    'mp4': cv2.VideoWriter_fourcc(*'XVID'),
+    #    'mp4': cv2.VideoWriter_fourcc(*'XVID'),
+    'mp4': cv2.VideoWriter_fourcc(*'MJPG'),
 }
 
 def get_video_type(filename):
@@ -112,6 +134,35 @@ def sendStatus(data):
     pastebin_url = r.text
     print(mlh.bcolors.OKGREEN + "Sent:%s"%pastebin_url + mlh.bcolors.ENDC)
     '''
+
+# function to record audio and write it to a file
+def recAudio(name):
+    p = pyaudio.PyAudio()
+    stream = p.open(input_device_index=int(INPUT_IND), format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
+
+    print("* audio recording")
+    
+    frames = []
+
+    while (event_in_prog):
+        data = stream.read(CHUNK)
+        frames.append(data)
+
+    print("* done audio recording")
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
+    wf = wave.open(current_event_name + ".wav", 'wb')
+    wf.setnchannels(CHANNELS)
+    wf.setsampwidth(p.get_sample_size(FORMAT))
+    wf.setframerate(RATE)
+    wf.writeframes(b''.join(frames))
+    wf.close()
 
 # construct the argument parse and parse the arguments
 ap = argparse.ArgumentParser()
@@ -201,30 +252,40 @@ door_status_sent = False
 # person
 personSentAt = time.time()
 last_rec_period = time.time()
-event_in_prog = False
 
+
+#cv2.size::Size S = cv::Size((int) vcap.get(CV_CAP_PROP_FRAME_WIDTH), (int) vcap.get(CV_CAP_PROP_FRAME_HEIGHT));
+#MJPG
 vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
 
+#int(vout.get(CV_CAP_PROP_FRAME_WIDTH)), int(vout.get(CV_CAP_PROP_FRAME_HEIGHT))
 while(True):
     cur_time = time.time()
     ret, frame = camera.read()
+    #handle buffer
+
+
 
     if (cur_time - last_rec_period) <= 10 :
         vout.write(frame)
     else:
         if event_in_prog == False:
             last_rec_period = cur_time
-            vout.release()
-            vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
+            print("THIS HAS BEEN CALLED")
+            print("FYI FYI FYI")
+            print("THIS HAS BEEN CALLED")
+            #vout.release()
+            #vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
         else:
             vout.write(frame)
-            if (cur_time - last_rec_period) > 20:
-                fmt = "%Y%m%d%H%M%S%f"
-                date = datetime.now(timezone.utc)
-                new_filename = "cv-%s.avi" % date.strftime(fmt)
+            if (cur_time - lastDoorEvent) > 10:
+                # NEED TO ADD CODE HERE TO FFMPEG MERGE THE VIDEO AND AUDIO
+                #fmt = "%Y%m%d%H%M%S%f"
+                #date = datetime.now(timezone.utc)
+                #new_filename = "cv-%s.avi" % date.strftime(fmt)
                 last_rec_period = cur_time
                 vout.release()
-                os.rename(filename, new_filename)
+                os.rename(filename, current_event_name + ".avi")
                 event_in_prog = False
                 vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
 
@@ -243,7 +304,18 @@ while(True):
     avg = door_handle_gray.mean()
 
     if avg < 100:
-        event_in_prog = True
+        #signal an event
+        if event_in_prog == False:
+            event_in_prog = True
+            print("starting audio recorder thread")
+            #starting a new door event
+            fmt = "%Y%m%d%H%M%S%f"
+            date = datetime.now(timezone.utc)
+            current_event_name = "cv" + date.strftime(fmt)
+            threading._start_new_thread(recAudio, ("fname", ))
+
+        lastDoorEvent = time.time()
+
         status_door = True
         if not door_status_sent:
             print("\n")
