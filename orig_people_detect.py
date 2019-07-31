@@ -1,7 +1,6 @@
 #!/opt/local/bin/python3
 
 # import the necessary packages
-# dont forget to sudo apt-get install portaudio19-dev
 from __future__ import print_function
 from imutils.object_detection import non_max_suppression
 from imutils import paths
@@ -10,10 +9,7 @@ import argparse
 import imutils
 from datetime import datetime, timezone
 import os
-import subprocess
 import cv2
-import wave
-import pyaudio
 import sys
 import time
 import pytz
@@ -21,7 +17,6 @@ from matplotlib import pyplot as plt
 from scipy.spatial import distance
 import uuid
 import ml_helper as mlh
-import threading
 
 
 filename = '._in_progress.avi'
@@ -33,24 +28,7 @@ stream_source = 'none'
 #begin counter / end counter
 doorevent = False
 event_begin = 0
-event_in_prog = False
-current_event_name = ""
 
-#My recording parameters
-RECORDING = False
-TIME_TO_BUFFER = 10 #seconds to record before event
-lastDoorEvent = 0
-VIDEO_AFTER_EVENT = 10 #seconds to record after event
-
-#audio params
-CHUNK = 1024
-FORMAT = pyaudio.paInt16
-WIDTH = 2
-CHANNELS = 2
-RATE = 44100
-RECORD_SECONDS = 5
-INPUT_IND = 6
-RECORD = True
 
 # Set resolution for the video capture
 # Function adapted from https://kirr.co/0l6qmh
@@ -79,10 +57,9 @@ def get_dims(cap, res='1080p'):
 # Video Encoding, might require additional installs
 # Types of Codes: http://www.fourcc.org/codecs.php
 VIDEO_TYPE = {
-    'avi': cv2.VideoWriter_fourcc(*'MJPG'),
+    'avi': cv2.VideoWriter_fourcc(*'XVID'),
     #'mp4': cv2.VideoWriter_fourcc(*'H264'),
-    #    'mp4': cv2.VideoWriter_fourcc(*'XVID'),
-    'mp4': cv2.VideoWriter_fourcc(*'MJPG'),
+    'mp4': cv2.VideoWriter_fourcc(*'XVID'),
 }
 
 def get_video_type(filename):
@@ -133,71 +110,14 @@ def sendStatus(data):
     print(mlh.bcolors.OKGREEN + "Sent:%s"%pastebin_url + mlh.bcolors.ENDC)
     '''
 
-# fuction to merge video and audio in a seperate thread so as to not lock
-def mergeSources(name):
-    #small race condition when releasing resources
-    time.sleep(0.1)
-    subprocess.call(['ffmpeg', '-loglevel', 'panic', '-i', name + '.avi', '-i', name + '.wav', '-c', 'copy', name + 'm.avi'])
-    #NEED TO DELETE SOURCE FILES
-    print("finished merging video")
-
-# function to record audio and write it to a file
-def recAudio(name):
-    p = pyaudio.PyAudio()
-    stream = p.open(input_device_index=int(INPUT_IND), format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
-                    input=True,
-                    frames_per_buffer=CHUNK)
-
-    print("* audio recording")
-    
-    frames = []
-
-    while (event_in_prog):
-        data = stream.read(CHUNK)
-        frames.append(data)
-
-    print("* done audio recording")
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-    wf = wave.open(current_event_name + ".wav", 'wb')
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
-    wf.setframerate(RATE)
-    wf.writeframes(b''.join(frames))
-    wf.close()
-
 # construct the argument parse and parse the arguments
 ap = argparse.ArgumentParser()
 ap.add_argument("-v", "--video", help="path to the video file")
-ap.add_argument("-a", "--audio", help="Choose a specific audio device. Or --audio list to list audio devices")
 args = vars(ap.parse_args())
 
 # initialize the HOG descriptor/person detector
 hog = cv2.HOGDescriptor()
 hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
-
-# These arg handle the audo options audio list and audio selection
-if args.get("audio", None) is not None:
-    if args["audio"] == "list":
-        try:
-            p = pyaudio.PyAudio()
-        except:
-
-            pass
-        info = p.get_host_api_info_by_index(0)
-        numdevices = info.get('deviceCount')
-        for i in range(0, numdevices):
-            if (p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
-                print ("Input Device id ", i, " - ", p.get_device_info_by_host_api_device_index(0, i).get('name'))
-        quit()
-    else:
-        print (args["audio"])
-        INPUT_IND = int(args["audio"])
 
 # if the video argument is None, then we are reading from webcam
 if args.get("video", None) is None:
@@ -247,18 +167,13 @@ selectedPoint = 1
 # define danger / safe areas ... will use later on
 
 print (STD_DIMENSIONS[res][0])
-#danger_area_pts1 = np.array([[6,1],[70,1],[126,358],[4,358]], np.int32)
-#danger_area_pts2 = np.array([[531,1],[640,1],[640,356],[537,356]], np.int32)
-
-#danger_area_pts3 = (381,1,497,248)
-
-danger_area_pts1 = np.array([[0,0],[0,1],[0,1135],[154,1135]], np.int32)
-danger_area_pts2 = np.array([[0,1],[557,1],[154,1135],[453,1135]], np.int32)
+danger_area_pts1 = np.array([[6,1],[70,1],[126,358],[4,358]], np.int32)
+danger_area_pts2 = np.array([[531,1],[640,1],[640,356],[537,356]], np.int32)
 
 danger_area_pts3 = (381,1,497,248)
 status_crash = False
 
-exit_area_pts = np.array([[557,1],[630,1],[453,1135],[630,1135]], np.int32)
+exit_area_pts = np.array([[72,1],[536,1],[536,356],[132,356]], np.int32)
 
 # define where we do the person detection
 exit_area_detection = (180,00,371,154)
@@ -277,51 +192,33 @@ door_status_sent = False
 # person
 personSentAt = time.time()
 last_rec_period = time.time()
+event_in_prog = False
 
+vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
 
-#cv2.size::Size S = cv::Size((int) vcap.get(CV_CAP_PROP_FRAME_WIDTH), (int) vcap.get(CV_CAP_PROP_FRAME_HEIGHT));
-#MJPG
-
-frame_width = int( camera.get(cv2.CAP_PROP_FRAME_WIDTH))
-frame_height =int( camera.get( cv2.CAP_PROP_FRAME_HEIGHT))
-incoming_FPS = int(camera.get(cv2.CAP_PROP_FPS))
-fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-#camera.set(cv2.CAP_PROP_BUFFERSIZE, incoming_FPS * 10)
-vout = cv2.VideoWriter(filename, fourcc, incoming_FPS, (frame_width, frame_height))
-#vout = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'MJPG'), 25, get_dims(camera, res))
-
-#int(vout.get(CV_CAP_PROP_FRAME_WIDTH)), int(vout.get(CV_CAP_PROP_FRAME_HEIGHT))
 while(True):
+
     cur_time = time.time()
     ret, frame = camera.read()
-    #handle buffer
 
     if (cur_time - last_rec_period) <= 10 :
         vout.write(frame)
     else:
         if event_in_prog == False:
             last_rec_period = cur_time
-            print("THIS HAS BEEN CALLED")
-            print("FYI FYI FYI")
-            print("THIS HAS BEEN CALLED")
-            #vout.release()
-            #vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
+            vout.release()
+            vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
         else:
             vout.write(frame)
-            if (cur_time - lastDoorEvent) > 10:
-                # NEED TO ADD CODE HERE TO FFMPEG MERGE THE VIDEO AND AUDIO
-                #fmt = "%Y%m%d%H%M%S%f"
-                #date = datetime.now(timezone.utc)
-                #new_filename = "cv-%s.avi" % date.strftime(fmt)
+            if (cur_time - last_rec_period) > 20:
+                fmt = "%Y%m%d%H%M%S%f"
+                date = datetime.now(timezone.utc)
+                new_filename = "cv-%s.avi" % date.strftime(fmt)
                 last_rec_period = cur_time
                 vout.release()
-                os.rename(filename, current_event_name + ".avi")
+                os.rename(filename, new_filename)
                 event_in_prog = False
-                vout = cv2.VideoWriter(filename, fourcc, incoming_FPS, (frame_width, frame_height))
-                #ONCE THIS IS DONE WE NEED TO MERGE WITH FFMPEG IN A NEW PROC
-                threading._start_new_thread(mergeSources, (current_event_name, ))
-
-                #vout = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'MJPG'), 25, get_dims(camera, res))
+                vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
 
     # little code for looping on the video
     frame_counter += 1
@@ -338,18 +235,7 @@ while(True):
     avg = door_handle_gray.mean()
 
     if avg < 100:
-        #signal an event
-        if event_in_prog == False:
-            event_in_prog = True
-            print("starting audio recorder thread")
-            #starting a new door event
-            fmt = "%Y%m%d%H%M%S%f"
-            date = datetime.now(timezone.utc)
-            current_event_name = "cv" + date.strftime(fmt)
-            threading._start_new_thread(recAudio, ("fname", ))
-
-        lastDoorEvent = time.time()
-
+        event_in_prog = True
         status_door = True
         if not door_status_sent:
             print("\n")

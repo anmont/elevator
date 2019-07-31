@@ -73,16 +73,12 @@ class RecordAudio():
             self.stream.stop_stream()
             self.stream.close()
             self.audio.terminate()
-
-
             waveFile = wave.open(self.audio_filename, 'wb')
             waveFile.setnchannels(self.channels)
             waveFile.setsampwidth(self.audio.get_sample_size(self.format))
             waveFile.setframerate(self.rate)
             waveFile.writeframes(b''.join(self.audio_frames))
             waveFile.close()
-
-
         pass
 
     # Launches the audio recording function using a thread

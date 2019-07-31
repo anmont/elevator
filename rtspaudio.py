@@ -9,6 +9,7 @@ import numpy as np
 import argparse
 import imutils
 from datetime import datetime, timezone
+import socket
 import os
 import subprocess
 import cv2
@@ -35,20 +36,23 @@ doorevent = False
 event_begin = 0
 event_in_prog = False
 current_event_name = ""
+status_door = False
 
 #My recording parameters
-RECORDING = False
+
 TIME_TO_BUFFER = 10 #seconds to record before event
 lastDoorEvent = 0
 VIDEO_AFTER_EVENT = 10 #seconds to record after event
 
 #audio params
+audio_port = 554
+ip = "admin:admin@192.168.1.108"
 CHUNK = 1024
 FORMAT = pyaudio.paInt16
 WIDTH = 2
 CHANNELS = 2
 RATE = 44100
-RECORD_SECONDS = 5
+RECORD_SECONDS = 10
 INPUT_IND = 6
 RECORD = True
 
@@ -141,9 +145,52 @@ def mergeSources(name):
     #NEED TO DELETE SOURCE FILES
     print("finished merging video")
 
+def drawSafeZones(cv2):
+    cv2.polylines(image, np.array([danger_area_pts1]), True, (0,0,255), 2)
+    cv2.polylines(image, np.array([danger_area_pts2]), True, (0,0,255), 2)
+
+    if status_door:
+        cv2.polylines(image, np.array([exit_area_pts]), True, (0,255,0), 2)
+    else:
+        cv2.polylines(image, np.array([exit_area_pts]), True, (0,0,255), 2)
+
+    cv2.imshow("After", image)
+
+def doorDetection(avg):
+    if avg < 100:
+        #Register globals (sadly)
+        global event_in_prog
+        global current_event_name
+        global lastDoorEvent
+        global status_door
+        global door_status_sent
+        
+        #signal an event
+        if event_in_prog == False:
+            event_in_prog = True
+            #print("starting audio recorder thread")
+            #starting a new door event
+            fmt = "%Y%m%d%H%M%S%f"
+            date = datetime.now(timezone.utc)
+            current_event_name = "cv" + date.strftime(fmt)
+
+        lastDoorEvent = time.time()
+        
+        if not status_door:
+            print("\n")
+            print(mlh.bcolors.WARNING + "Door Open" + mlh.bcolors.ENDC)
+            sendDoorStatus()
+            door_status_sent = True
+        status_door = True
+    else:
+        status_door = False
+        door_status_sent = False
+
 # function to record audio and write it to a file
 def recAudio(name):
     p = pyaudio.PyAudio()
+    p.open()
+
     stream = p.open(input_device_index=int(INPUT_IND), format=FORMAT,
                     channels=CHANNELS,
                     rate=RATE,
@@ -151,24 +198,52 @@ def recAudio(name):
                     frames_per_buffer=CHUNK)
 
     print("* audio recording")
-    
-    frames = []
 
-    while (event_in_prog):
+    RECORDING = False
+    framebuffer = []
+    recorderframes = []
+
+    #for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+    while (True):
+        #case 1 alwasy recording
         data = stream.read(CHUNK)
-        frames.append(data)
+        framebuffer.append(data)
 
-    print("* done audio recording")
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+        #print(framebuffer.count)
+        if (framebuffer.count > int(RATE / CHUNK * RECORD_SECONDS)):
+            del framebuffer[0]
 
-    wf = wave.open(current_event_name + ".wav", 'wb')
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
-    wf.setframerate(RATE)
-    wf.writeframes(b''.join(frames))
-    wf.close()
+        #case 2 recording started
+        if (event_in_prog and not RECORDING):
+            recorderframes = framebuffer.copy()
+            print("* start audio recording")
+            RECORDING = True
+            #framebuffer.append(data) not sure... the copy shouldnt take a chunk time so leaving out now
+
+        #case 3 recording in progress
+        if (event_in_prog and RECORDING):
+            recorderframes.append(data)
+            #framebuffer.append(data) 
+        
+        #case 4 wrap up recording
+        if (not event_in_prog and RECORDING):
+            #stream.stop_stream()
+            #stream.close()
+            wf = wave.open(current_event_name + ".wav", 'wb')
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(p.get_sample_size(FORMAT))
+            wf.setframerate(RATE)
+            wf.writeframes(b''.join(recorderframes))
+            wf.close()
+            recorderframes.clear()
+            RECORDING = False
+            print("* done audio recording")
+
+    #while (event_in_prog):
+    #    data = stream.read(CHUNK)
+    #    frames.append(data)
+
+    
 
 # construct the argument parse and parse the arguments
 ap = argparse.ArgumentParser()
@@ -202,7 +277,8 @@ if args.get("audio", None) is not None:
 # if the video argument is None, then we are reading from webcam
 if args.get("video", None) is None:
     stream_source = 'live'
-    camera = cv2.VideoCapture(0)
+    #camera = cv2.VideoCapture(0)
+    camera = cv2.VideoCapture("rtsp://admin:admin@192.168.1.108:554/live")
     #camera.set(CV_CAP_PROP_BUFFERSIZE, 250)
     time.sleep(0.25)
 # otherwise, we are reading from a video file
@@ -247,25 +323,22 @@ selectedPoint = 1
 # define danger / safe areas ... will use later on
 
 print (STD_DIMENSIONS[res][0])
-#danger_area_pts1 = np.array([[6,1],[70,1],[126,358],[4,358]], np.int32)
-#danger_area_pts2 = np.array([[531,1],[640,1],[640,356],[537,356]], np.int32)
-
-#danger_area_pts3 = (381,1,497,248)
-
-danger_area_pts1 = np.array([[0,0],[0,1],[0,1135],[154,1135]], np.int32)
-danger_area_pts2 = np.array([[0,1],[557,1],[154,1135],[453,1135]], np.int32)
-
+danger_area_pts1 = np.array([[6,1],[70,1],[126,358],[4,358]], np.int32)
+danger_area_pts2 = np.array([[531,1],[640,1],[640,356],[537,356]], np.int32)
 danger_area_pts3 = (381,1,497,248)
+
+#danger_area_pts1 = np.array([[0,0],[0,1],[0,1135],[154,1135]], np.int32)
+#danger_area_pts2 = np.array([[0,1],[557,1],[154,1135],[453,1135]], np.int32)
+#danger_area_pts3 = (381,1,497,248)
 status_crash = False
-
-exit_area_pts = np.array([[557,1],[630,1],[453,1135],[630,1135]], np.int32)
-
+#exit_area_pts = np.array([[557,1],[630,1],[453,1135],[630,1135]], np.int32)
+exit_area_pts = np.array([[72,1],[536,1],[536,356],[132,356]], np.int32)
 # define where we do the person detection
 exit_area_detection = (180,00,371,154)
 
 # our "Marker" for detecting open door... 
 coord_door_open = (175, 118, 178, 122)
-status_door = False
+
 
 cv2.setMouseCallback('After',getMousePoint)
 numPeople = 0
@@ -278,15 +351,16 @@ door_status_sent = False
 personSentAt = time.time()
 last_rec_period = time.time()
 
-
 #cv2.size::Size S = cv::Size((int) vcap.get(CV_CAP_PROP_FRAME_WIDTH), (int) vcap.get(CV_CAP_PROP_FRAME_HEIGHT));
-#MJPG
 
 frame_width = int( camera.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height =int( camera.get( cv2.CAP_PROP_FRAME_HEIGHT))
 incoming_FPS = int(camera.get(cv2.CAP_PROP_FPS))
 fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-#camera.set(cv2.CAP_PROP_BUFFERSIZE, incoming_FPS * 10)
+#We dont want to start recording audio thread if its from a file
+if (stream_source == "live"):
+    threading._start_new_thread(recAudio, ("fname", ))
+
 vout = cv2.VideoWriter(filename, fourcc, incoming_FPS, (frame_width, frame_height))
 #vout = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'MJPG'), 25, get_dims(camera, res))
 
@@ -296,23 +370,23 @@ while(True):
     ret, frame = camera.read()
     #handle buffer
 
+    #create recording buffer
+    #create framebuffer
+    
+    videoframebuffer = []
+    recorderframebuffer = []
+
+
+    #TODO stabilize the frames per second in the video recording
+
     if (cur_time - last_rec_period) <= 10 :
         vout.write(frame)
     else:
         if event_in_prog == False:
             last_rec_period = cur_time
-            print("THIS HAS BEEN CALLED")
-            print("FYI FYI FYI")
-            print("THIS HAS BEEN CALLED")
-            #vout.release()
-            #vout = cv2.VideoWriter(filename, get_video_type(filename), 25, get_dims(camera, res))
         else:
             vout.write(frame)
             if (cur_time - lastDoorEvent) > 10:
-                # NEED TO ADD CODE HERE TO FFMPEG MERGE THE VIDEO AND AUDIO
-                #fmt = "%Y%m%d%H%M%S%f"
-                #date = datetime.now(timezone.utc)
-                #new_filename = "cv-%s.avi" % date.strftime(fmt)
                 last_rec_period = cur_time
                 vout.release()
                 os.rename(filename, current_event_name + ".avi")
@@ -320,8 +394,6 @@ while(True):
                 vout = cv2.VideoWriter(filename, fourcc, incoming_FPS, (frame_width, frame_height))
                 #ONCE THIS IS DONE WE NEED TO MERGE WITH FFMPEG IN A NEW PROC
                 threading._start_new_thread(mergeSources, (current_event_name, ))
-
-                #vout = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'MJPG'), 25, get_dims(camera, res))
 
     # little code for looping on the video
     frame_counter += 1
@@ -337,30 +409,8 @@ while(True):
     door_handle_gray = image[coord_door_open[1]:coord_door_open[3], coord_door_open[0]:coord_door_open[2]]
     avg = door_handle_gray.mean()
 
-    if avg < 100:
-        #signal an event
-        if event_in_prog == False:
-            event_in_prog = True
-            print("starting audio recorder thread")
-            #starting a new door event
-            fmt = "%Y%m%d%H%M%S%f"
-            date = datetime.now(timezone.utc)
-            current_event_name = "cv" + date.strftime(fmt)
-            threading._start_new_thread(recAudio, ("fname", ))
-
-        lastDoorEvent = time.time()
-
-        status_door = True
-        if not door_status_sent:
-            print("\n")
-            print(mlh.bcolors.WARNING + "Door Open" + mlh.bcolors.ENDC)
-            sendDoorStatus()
-            door_status_sent = True
-    else:
-        status_door = False
-        door_status_sent = False
-
-
+    #attempt to move actions off main thread for more logic
+    doorDetection(avg)
     # end Door Open Detection
 
     # begin People Detection
@@ -402,15 +452,16 @@ while(True):
         cv2.rectangle(image, (xA, yA), (xB, yB), (100, 255, 100), 1)
 
     # Draw Danger / Safe zones
-    cv2.polylines(image, np.array([danger_area_pts1]), True, (0,0,255), 2)
-    cv2.polylines(image, np.array([danger_area_pts2]), True, (0,0,255), 2)
+    drawSafeZones(cv2)
+    #cv2.polylines(image, np.array([danger_area_pts1]), True, (0,0,255), 2)
+    #cv2.polylines(image, np.array([danger_area_pts2]), True, (0,0,255), 2)
 
-    if status_door:
-        cv2.polylines(image, np.array([exit_area_pts]), True, (0,255,0), 2)
-    else:
-        cv2.polylines(image, np.array([exit_area_pts]), True, (0,0,255), 2)
+    #if status_door:
+    #    cv2.polylines(image, np.array([exit_area_pts]), True, (0,255,0), 2)
+    #else:
+    #    cv2.polylines(image, np.array([exit_area_pts]), True, (0,0,255), 2)
 
-    cv2.imshow("After", image)
+    #cv2.imshow("After", image)
 
     k = cv2.waitKey(1)
     if k==27:
